@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────
-#  BOT DE TRADING - Sin dependencias pesadas
-#  Calcula EMA + RSI con Python puro
+#  BOT DE TRADING - Usa CoinGecko (sin restricciones)
+#  Calcula EMA + RSI y manda señales por WhatsApp
 # ─────────────────────────────────────────────────────────
 
 from flask import Flask, jsonify
@@ -19,8 +19,8 @@ app = Flask(__name__)
 WHATSAPP_NUMERO  = os.environ.get("WHATSAPP_NUMERO", "TU_NUMERO_AQUI")
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "TU_APIKEY_AQUI")
 
+MONEDA      = "bitcoin"   # ID en CoinGecko
 SIMBOLO     = "BTCUSDT"
-INTERVALO   = "1h"
 EMA_RAPIDA  = 9
 EMA_LENTA   = 21
 RSI_PERIODO = 14
@@ -28,12 +28,11 @@ RSI_PERIODO = 14
 ultima_senal = {"accion": None}
 
 # ─────────────────────────────────────────
-# FUNCIONES MATEMÁTICAS (sin pandas)
+# FUNCIONES MATEMÁTICAS
 # ─────────────────────────────────────────
 
 def calcular_ema(precios, periodo):
-    """Calcula EMA con Python puro."""
-    k = 2.0 / (periodo + 1)
+    k   = 2.0 / (periodo + 1)
     ema = precios[0]
     for precio in precios[1:]:
         ema = precio * k + ema * (1 - k)
@@ -41,9 +40,7 @@ def calcular_ema(precios, periodo):
 
 
 def calcular_rsi(precios, periodo=14):
-    """Calcula RSI con Python puro."""
-    ganancias = []
-    perdidas  = []
+    ganancias, perdidas = [], []
     for i in range(1, len(precios)):
         diff = precios[i] - precios[i - 1]
         if diff >= 0:
@@ -52,32 +49,32 @@ def calcular_rsi(precios, periodo=14):
         else:
             ganancias.append(0)
             perdidas.append(abs(diff))
-
-    avg_ganancia = sum(ganancias[-periodo:]) / periodo
-    avg_perdida  = sum(perdidas[-periodo:])  / periodo
-
-    if avg_perdida == 0:
+    avg_gan = sum(ganancias[-periodo:]) / periodo
+    avg_per = sum(perdidas[-periodo:])  / periodo
+    if avg_per == 0:
         return 100
-    rs  = avg_ganancia / avg_perdida
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + avg_gan / avg_per))
 
 
-def obtener_velas():
-    """Obtiene las últimas 100 velas de Binance."""
-    url    = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": SIMBOLO, "interval": INTERVALO, "limit": 100}
+def obtener_precios():
+    """Obtiene los últimos 30 días de precios desde CoinGecko."""
+    url = f"https://api.coingecko.com/api/v3/coins/{MONEDA}/market_chart"
+    params = {"vs_currency": "usd", "days": "30", "interval": "hourly"}
     try:
-        r    = requests.get(url, params=params, timeout=10)
+        r    = requests.get(url, params=params, timeout=15)
         data = r.json()
-        return [float(v[4]) for v in data]
+        if "prices" not in data:
+            print(f"[CoinGecko] Respuesta inesperada: {data}")
+            return None
+        precios = [p[1] for p in data["prices"]]
+        print(f"[CoinGecko] {len(precios)} velas obtenidas. Último precio: ${precios[-1]:,.2f}")
+        return precios
     except Exception as e:
-        print(f"[Binance] Error: {e}")
+        print(f"[CoinGecko] Error: {e}")
         return None
 
 
 def enviar_whatsapp(mensaje: str):
-    """Envía mensaje por WhatsApp via CallMeBot."""
     mensaje_codificado = urllib.parse.quote(mensaje)
     url = (
         f"https://api.callmebot.com/whatsapp.php"
@@ -95,11 +92,10 @@ def enviar_whatsapp(mensaje: str):
 
 
 def analizar_mercado():
-    """Analiza el mercado y envía señal si hay cruce de EMA."""
     global ultima_senal
     print(f"[Bot] Analizando {SIMBOLO}...")
 
-    precios = obtener_velas()
+    precios = obtener_precios()
     if not precios or len(precios) < 30:
         print("[Bot] No hay suficientes datos.")
         return
@@ -111,7 +107,7 @@ def analizar_mercado():
     ema_l_prev = calcular_ema(precios[:-1], EMA_LENTA)
     rsi        = calcular_rsi(precios,      RSI_PERIODO)
 
-    print(f"[Bot] Precio: {precio_actual:.2f} | EMA9: {ema_r:.2f} | EMA21: {ema_l:.2f} | RSI: {rsi:.1f}")
+    print(f"[Bot] Precio: ${precio_actual:,.2f} | EMA9: {ema_r:.2f} | EMA21: {ema_l:.2f} | RSI: {rsi:.1f}")
 
     cruce_alcista = ema_r_prev < ema_l_prev and ema_r > ema_l
     cruce_bajista = ema_r_prev > ema_l_prev and ema_r < ema_l
@@ -126,7 +122,6 @@ def analizar_mercado():
         ultima_senal["accion"] = senal
         emoji = "🟢" if senal == "COMPRA" else "🔴"
         hora  = datetime.now().strftime("%d/%m/%Y %H:%M")
-
         mensaje = (
             f"{emoji} *SEÑAL DE {senal}*\n"
             f"📊 Par: {SIMBOLO}\n"
@@ -137,14 +132,13 @@ def analizar_mercado():
             f"─────────────────\n"
             f"⚠️ Recuerda gestionar tu riesgo."
         )
-        print(f"[Bot] Señal detectada: {senal}")
+        print(f"[Bot] ¡Señal detectada! {senal}")
         enviar_whatsapp(mensaje)
     else:
         print("[Bot] Sin señal nueva.")
 
 
 def loop_analisis():
-    """Analiza el mercado cada hora automáticamente."""
     while True:
         analizar_mercado()
         time.sleep(3600)
@@ -161,7 +155,6 @@ def inicio():
 
 @app.route("/analizar", methods=["GET"])
 def analizar_ahora():
-    """Fuerza un análisis inmediato para probar."""
     analizar_mercado()
     return jsonify({"estado": "Análisis completado ✅"}), 200
 
@@ -173,7 +166,6 @@ def analizar_ahora():
 if __name__ == "__main__":
     hilo = threading.Thread(target=loop_analisis, daemon=True)
     hilo.start()
-
     port = int(os.environ.get("PORT", 5000))
     print(f"🚀 Bot iniciado en puerto {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
