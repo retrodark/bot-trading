@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────
-#  BOT DE TRADING - Usa CoinGecko (sin restricciones)
+#  BOT DE TRADING - Usa Kraken (sin límite de solicitudes)
 #  Calcula EMA + RSI y manda señales por WhatsApp
 #  Revisa cada 30 minutos con velas de 1 hora
 # ─────────────────────────────────────────────────────────
@@ -20,8 +20,8 @@ app = Flask(__name__)
 WHATSAPP_NUMERO  = os.environ.get("WHATSAPP_NUMERO", "TU_NUMERO_AQUI")
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "TU_APIKEY_AQUI")
 
-MONEDA      = "bitcoin"
-SIMBOLO     = "BTCUSDT"
+SIMBOLO     = "XBTUSD"   # BTC/USD en Kraken
+INTERVALO   = 60          # 60 minutos = velas de 1 hora
 EMA_RAPIDA  = 9
 EMA_LENTA   = 21
 RSI_PERIODO = 14
@@ -58,20 +58,29 @@ def calcular_rsi(precios, periodo=14):
 
 
 def obtener_precios():
-    """Obtiene los últimos 30 días de precios horarios desde CoinGecko."""
-    url = f"https://api.coingecko.com/api/v3/coins/{MONEDA}/market_chart"
-    params = {"vs_currency": "usd", "days": "30", "interval": "hourly"}
+    """Obtiene las últimas 200 velas de 1 hora desde Kraken."""
+    url    = "https://api.kraken.com/0/public/OHLC"
+    params = {"pair": SIMBOLO, "interval": INTERVALO}
     try:
         r    = requests.get(url, params=params, timeout=15)
         data = r.json()
-        if "prices" not in data:
-            print(f"[CoinGecko] Respuesta inesperada: {data}")
+
+        if data.get("error"):
+            print(f"[Kraken] Error: {data['error']}")
             return None
-        precios = [p[1] for p in data["prices"]]
-        print(f"[CoinGecko] {len(precios)} velas obtenidas. Último precio: ${precios[-1]:,.2f}")
+
+        # Kraken devuelve los datos dentro de una clave dinámica
+        result = data.get("result", {})
+        clave  = [k for k in result.keys() if k != "last"][0]
+        velas  = result[clave]
+
+        # Cada vela: [time, open, high, low, close, vwap, volume, count]
+        precios = [float(v[4]) for v in velas]  # usamos el precio de cierre
+        print(f"[Kraken] {len(precios)} velas obtenidas. Último precio: ${precios[-1]:,.2f}")
         return precios
+
     except Exception as e:
-        print(f"[CoinGecko] Error: {e}")
+        print(f"[Kraken] Error: {e}")
         return None
 
 
@@ -94,7 +103,7 @@ def enviar_whatsapp(mensaje: str):
 
 def analizar_mercado():
     global ultima_senal
-    print(f"[Bot] Analizando {SIMBOLO}...")
+    print(f"[Bot] Analizando BTC/USD...")
 
     precios = obtener_precios()
     if not precios or len(precios) < 30:
@@ -125,7 +134,7 @@ def analizar_mercado():
         hora  = datetime.now().strftime("%d/%m/%Y %H:%M")
         mensaje = (
             f"{emoji} *SEÑAL DE {senal}*\n"
-            f"📊 Par: {SIMBOLO}\n"
+            f"📊 Par: BTCUSDT\n"
             f"💵 Precio: ${precio_actual:,.2f}\n"
             f"📈 EMA9: {ema_r:.2f} | EMA21: {ema_l:.2f}\n"
             f"📉 RSI: {rsi:.1f}\n"
