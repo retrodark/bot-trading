@@ -1,6 +1,7 @@
 # ─────────────────────────────────────────────────────────
 #  BOT DE TRADING - Usa CoinGecko (sin restricciones)
 #  Calcula EMA + RSI y manda señales por WhatsApp
+#  Revisa cada 30 minutos con velas de 1 hora
 # ─────────────────────────────────────────────────────────
 
 from flask import Flask, jsonify
@@ -19,7 +20,7 @@ app = Flask(__name__)
 WHATSAPP_NUMERO  = os.environ.get("WHATSAPP_NUMERO", "TU_NUMERO_AQUI")
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "TU_APIKEY_AQUI")
 
-MONEDA      = "bitcoin"   # ID en CoinGecko
+MONEDA      = "bitcoin"
 SIMBOLO     = "BTCUSDT"
 EMA_RAPIDA  = 9
 EMA_LENTA   = 21
@@ -57,7 +58,7 @@ def calcular_rsi(precios, periodo=14):
 
 
 def obtener_precios():
-    """Obtiene los últimos 30 días de precios desde CoinGecko."""
+    """Obtiene los últimos 30 días de precios horarios desde CoinGecko."""
     url = f"https://api.coingecko.com/api/v3/coins/{MONEDA}/market_chart"
     params = {"vs_currency": "usd", "days": "30", "interval": "hourly"}
     try:
@@ -141,7 +142,7 @@ def analizar_mercado():
 def loop_analisis():
     while True:
         analizar_mercado()
-        time.sleep(3600)
+        time.sleep(1800)  # Revisa cada 30 minutos
 
 
 # ─────────────────────────────────────────
