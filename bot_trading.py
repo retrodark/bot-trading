@@ -1,6 +1,7 @@
 # ─────────────────────────────────────────────────────────
-#  BOT DE TRADING - Usa Kraken (sin límite de solicitudes)
-#  Calcula EMA + RSI y manda señales por WhatsApp
+#  BOT DE TRADING - Multi-moneda
+#  Monedas: BTC, ETH, SOL, XRP
+#  Fuente: Kraken | Notificaciones: WhatsApp
 #  Revisa cada 30 minutos con velas de 1 hora
 # ─────────────────────────────────────────────────────────
 
@@ -20,13 +21,21 @@ app = Flask(__name__)
 WHATSAPP_NUMERO  = os.environ.get("WHATSAPP_NUMERO", "TU_NUMERO_AQUI")
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "TU_APIKEY_AQUI")
 
-SIMBOLO     = "XBTUSD"   # BTC/USD en Kraken
-INTERVALO   = 60          # 60 minutos = velas de 1 hora
+# Monedas a monitorear: nombre legible → símbolo en Kraken
+MONEDAS = {
+    "Bitcoin  (BTC)":  "XBTUSD",
+    "Ethereum (ETH)":  "ETHUSD",
+    "Solana   (SOL)":  "SOLUSD",
+    "XRP      (XRP)":  "XRPUSD",
+}
+
+INTERVALO   = 60   # velas de 1 hora
 EMA_RAPIDA  = 9
 EMA_LENTA   = 21
 RSI_PERIODO = 14
 
-ultima_senal = {"accion": None}
+# Guarda la última señal por moneda para no repetir
+ultimas_senales = {nombre: None for nombre in MONEDAS}
 
 # ─────────────────────────────────────────
 # FUNCIONES MATEMÁTICAS
@@ -57,30 +66,27 @@ def calcular_rsi(precios, periodo=14):
     return 100 - (100 / (1 + avg_gan / avg_per))
 
 
-def obtener_precios():
-    """Obtiene las últimas 200 velas de 1 hora desde Kraken."""
+def obtener_precios(simbolo):
+    """Obtiene las últimas velas de 1 hora desde Kraken para un símbolo."""
     url    = "https://api.kraken.com/0/public/OHLC"
-    params = {"pair": SIMBOLO, "interval": INTERVALO}
+    params = {"pair": simbolo, "interval": INTERVALO}
     try:
         r    = requests.get(url, params=params, timeout=15)
         data = r.json()
 
         if data.get("error"):
-            print(f"[Kraken] Error: {data['error']}")
+            print(f"[Kraken] Error en {simbolo}: {data['error']}")
             return None
 
-        # Kraken devuelve los datos dentro de una clave dinámica
         result = data.get("result", {})
         clave  = [k for k in result.keys() if k != "last"][0]
         velas  = result[clave]
-
-        # Cada vela: [time, open, high, low, close, vwap, volume, count]
-        precios = [float(v[4]) for v in velas]  # usamos el precio de cierre
-        print(f"[Kraken] {len(precios)} velas obtenidas. Último precio: ${precios[-1]:,.2f}")
+        precios = [float(v[4]) for v in velas]
+        print(f"[Kraken] {simbolo}: {len(precios)} velas | Precio: ${precios[-1]:,.4f}")
         return precios
 
     except Exception as e:
-        print(f"[Kraken] Error: {e}")
+        print(f"[Kraken] Error en {simbolo}: {e}")
         return None
 
 
@@ -101,13 +107,11 @@ def enviar_whatsapp(mensaje: str):
         return False
 
 
-def analizar_mercado():
-    global ultima_senal
-    print(f"[Bot] Analizando BTC/USD...")
-
-    precios = obtener_precios()
+def analizar_moneda(nombre, simbolo):
+    """Analiza una moneda y envía señal si corresponde."""
+    precios = obtener_precios(simbolo)
     if not precios or len(precios) < 30:
-        print("[Bot] No hay suficientes datos.")
+        print(f"[Bot] {nombre}: No hay suficientes datos.")
         return
 
     precio_actual = precios[-1]
@@ -117,7 +121,7 @@ def analizar_mercado():
     ema_l_prev = calcular_ema(precios[:-1], EMA_LENTA)
     rsi        = calcular_rsi(precios,      RSI_PERIODO)
 
-    print(f"[Bot] Precio: ${precio_actual:,.2f} | EMA9: {ema_r:.2f} | EMA21: {ema_l:.2f} | RSI: {rsi:.1f}")
+    print(f"[Bot] {nombre} | EMA9: {ema_r:.4f} | EMA21: {ema_l:.4f} | RSI: {rsi:.1f}")
 
     cruce_alcista = ema_r_prev < ema_l_prev and ema_r > ema_l
     cruce_bajista = ema_r_prev > ema_l_prev and ema_r < ema_l
@@ -128,24 +132,40 @@ def analizar_mercado():
     elif cruce_bajista and rsi > 30:
         senal = "VENTA"
 
-    if senal and senal != ultima_senal["accion"]:
-        ultima_senal["accion"] = senal
-        emoji = "🟢" if senal == "COMPRA" else "🔴"
-        hora  = datetime.now().strftime("%d/%m/%Y %H:%M")
+    if senal and senal != ultimas_senales[nombre]:
+        ultimas_senales[nombre] = senal
+        emoji       = "🟢" if senal == "COMPRA" else "🔴"
+        emoji_moneda = {
+            "Bitcoin  (BTC)": "₿",
+            "Ethereum (ETH)": "Ξ",
+            "Solana   (SOL)": "◎",
+            "XRP      (XRP)": "✕",
+        }.get(nombre, "🪙")
+        hora = datetime.now().strftime("%d/%m/%Y %H:%M")
+
         mensaje = (
             f"{emoji} *SEÑAL DE {senal}*\n"
-            f"📊 Par: BTCUSDT\n"
-            f"💵 Precio: ${precio_actual:,.2f}\n"
-            f"📈 EMA9: {ema_r:.2f} | EMA21: {ema_l:.2f}\n"
+            f"{emoji_moneda} *Moneda: {nombre.strip()}*\n"
+            f"💵 Precio: ${precio_actual:,.4f}\n"
+            f"📈 EMA9: {ema_r:.4f} | EMA21: {ema_l:.4f}\n"
             f"📉 RSI: {rsi:.1f}\n"
             f"🕐 Hora: {hora}\n"
             f"─────────────────\n"
             f"⚠️ Recuerda gestionar tu riesgo."
         )
-        print(f"[Bot] ¡Señal detectada! {senal}")
+        print(f"[Bot] ¡Señal detectada! {senal} en {nombre}")
         enviar_whatsapp(mensaje)
     else:
-        print("[Bot] Sin señal nueva.")
+        print(f"[Bot] {nombre}: Sin señal nueva.")
+
+
+def analizar_mercado():
+    """Analiza todas las monedas configuradas."""
+    print(f"\n[Bot] ── Análisis iniciado: {datetime.now().strftime('%d/%m/%Y %H:%M')} ──")
+    for nombre, simbolo in MONEDAS.items():
+        analizar_moneda(nombre, simbolo)
+        time.sleep(3)  # Pequeña pausa entre monedas para no saturar la API
+    print(f"[Bot] ── Análisis completado ──\n")
 
 
 def loop_analisis():
@@ -165,6 +185,7 @@ def inicio():
 
 @app.route("/analizar", methods=["GET"])
 def analizar_ahora():
+    """Fuerza un análisis inmediato de todas las monedas."""
     analizar_mercado()
     return jsonify({"estado": "Análisis completado ✅"}), 200
 
@@ -177,5 +198,5 @@ if __name__ == "__main__":
     hilo = threading.Thread(target=loop_analisis, daemon=True)
     hilo.start()
     port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Bot iniciado en puerto {port}")
+    print(f"🚀 Bot Multi-moneda iniciado en puerto {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
