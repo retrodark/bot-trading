@@ -1,13 +1,12 @@
 # ─────────────────────────────────────────────────────────
-#  BOT DE TRADING - Consulta Binance directamente
-#  Calcula EMA + RSI y manda señales por WhatsApp
+#  BOT DE TRADING - Sin dependencias pesadas
+#  Calcula EMA + RSI con Python puro
 # ─────────────────────────────────────────────────────────
 
 from flask import Flask, jsonify
 import requests
 import urllib.parse
 import os
-import pandas as pd
 from datetime import datetime
 import threading
 import time
@@ -29,14 +28,47 @@ RSI_PERIODO = 14
 ultima_senal = {"accion": None}
 
 # ─────────────────────────────────────────
-# FUNCIONES
+# FUNCIONES MATEMÁTICAS (sin pandas)
 # ─────────────────────────────────────────
 
+def calcular_ema(precios, periodo):
+    """Calcula EMA con Python puro."""
+    k = 2.0 / (periodo + 1)
+    ema = precios[0]
+    for precio in precios[1:]:
+        ema = precio * k + ema * (1 - k)
+    return ema
+
+
+def calcular_rsi(precios, periodo=14):
+    """Calcula RSI con Python puro."""
+    ganancias = []
+    perdidas  = []
+    for i in range(1, len(precios)):
+        diff = precios[i] - precios[i - 1]
+        if diff >= 0:
+            ganancias.append(diff)
+            perdidas.append(0)
+        else:
+            ganancias.append(0)
+            perdidas.append(abs(diff))
+
+    avg_ganancia = sum(ganancias[-periodo:]) / periodo
+    avg_perdida  = sum(perdidas[-periodo:])  / periodo
+
+    if avg_perdida == 0:
+        return 100
+    rs  = avg_ganancia / avg_perdida
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
 def obtener_velas():
-    url = "https://api.binance.com/api/v3/klines"
+    """Obtiene las últimas 100 velas de Binance."""
+    url    = "https://api.binance.com/api/v3/klines"
     params = {"symbol": SIMBOLO, "interval": INTERVALO, "limit": 100}
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r    = requests.get(url, params=params, timeout=10)
         data = r.json()
         return [float(v[4]) for v in data]
     except Exception as e:
@@ -44,20 +76,8 @@ def obtener_velas():
         return None
 
 
-def calcular_ema(precios, periodo):
-    return pd.Series(precios).ewm(span=periodo, adjust=False).mean().iloc[-1]
-
-
-def calcular_rsi(precios, periodo=14):
-    serie  = pd.Series(precios)
-    delta  = serie.diff()
-    ganancia = delta.where(delta > 0, 0).rolling(periodo).mean()
-    perdida  = (-delta.where(delta < 0, 0)).rolling(periodo).mean()
-    rs  = ganancia / perdida
-    return (100 - (100 / (1 + rs))).iloc[-1]
-
-
 def enviar_whatsapp(mensaje: str):
+    """Envía mensaje por WhatsApp via CallMeBot."""
     mensaje_codificado = urllib.parse.quote(mensaje)
     url = (
         f"https://api.callmebot.com/whatsapp.php"
@@ -75,6 +95,7 @@ def enviar_whatsapp(mensaje: str):
 
 
 def analizar_mercado():
+    """Analiza el mercado y envía señal si hay cruce de EMA."""
     global ultima_senal
     print(f"[Bot] Analizando {SIMBOLO}...")
 
@@ -123,6 +144,7 @@ def analizar_mercado():
 
 
 def loop_analisis():
+    """Analiza el mercado cada hora automáticamente."""
     while True:
         analizar_mercado()
         time.sleep(3600)
@@ -139,7 +161,7 @@ def inicio():
 
 @app.route("/analizar", methods=["GET"])
 def analizar_ahora():
-    """Llama a esta URL para forzar un análisis inmediato y probar."""
+    """Fuerza un análisis inmediato para probar."""
     analizar_mercado()
     return jsonify({"estado": "Análisis completado ✅"}), 200
 
