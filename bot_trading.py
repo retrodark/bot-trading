@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────
-#  BOT DE TRADING AVANZADO - Multi-moneda
-#  Estrategia: EMA + RSI + MACD + ATR
-#  Incluye: Precio entrada, Take Profit, Stop Loss
+#  BOT DE TRADING PRO - Multi-moneda
+#  Estrategia: EMA 9/21/200 + RSI + MACD + ATR
+#  Filtros: Tendencia general + Horario El Salvador
 #  Zona horaria: El Salvador (UTC-6)
 # ─────────────────────────────────────────────────────────
 
@@ -20,41 +20,55 @@ WHATSAPP_NUMERO  = os.environ.get("WHATSAPP_NUMERO", "TU_NUMERO_AQUI")
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "TU_APIKEY_AQUI")
 
 MONEDAS = {
-    "Bitcoin  (BTC)":  "XBTUSD",
-    "Ethereum (ETH)":  "ETHUSD",
-    "Solana   (SOL)":  "SOLUSD",
-    "XRP      (XRP)":  "XRPUSD",
+    "Bitcoin  (BTC)": "XBTUSD",
+    "Ethereum (ETH)": "ETHUSD",
+    "Solana   (SOL)": "SOLUSD",
+    "XRP      (XRP)": "XRPUSD",
 }
 
-INTERVALO   = 60   # velas de 1 hora
-EMA_RAPIDA  = 9
-EMA_LENTA   = 21
-RSI_PERIODO = 14
-MACD_RAPIDA = 12
-MACD_LENTA  = 26
-MACD_SEÑAL  = 9
-ATR_PERIODO = 14
+INTERVALO        = 60    # velas de 1 hora
+EMA_RAPIDA       = 9
+EMA_LENTA        = 21
+EMA_TENDENCIA    = 200   # Filtro de tendencia general
+RSI_PERIODO      = 14
+MACD_RAPIDA      = 12
+MACD_LENTA       = 26
+MACD_SEÑAL       = 9
+ATR_PERIODO      = 14
+TP_MULTIPLICADOR = 2.0
+SL_MULTIPLICADOR = 1.0
 
-# Take Profit y Stop Loss basados en ATR
-TP_MULTIPLICADOR = 2.0   # Take Profit = entrada ± 2x ATR
-SL_MULTIPLICADOR = 1.0   # Stop Loss   = entrada ∓ 1x ATR
+# ── Filtro de horario (hora El Salvador) ──
+HORA_INICIO = 8   # 8:00 AM
+HORA_FIN    = 22  # 10:00 PM
 
 # Zona horaria El Salvador (UTC-6)
 TZ_SLV = timezone(timedelta(hours=-6))
 
-ultimas_senales  = {nombre: None for nombre in MONEDAS}
-ultimo_analisis  = {"hora": None}
+ultimas_senales = {nombre: None for nombre in MONEDAS}
+ultimo_analisis = {"hora": None}
+
+# ─────────────────────────────────────────
+# UTILIDADES
+# ─────────────────────────────────────────
+
+def hora_elsalvador():
+    return datetime.now(TZ_SLV).strftime("%d/%m/%Y %I:%M %p")
+
+
+def es_horario_valido():
+    """Retorna True si estamos en horario de mayor liquidez (8AM - 10PM SLV)."""
+    hora_actual = datetime.now(TZ_SLV).hour
+    return HORA_INICIO <= hora_actual < HORA_FIN
+
 
 # ─────────────────────────────────────────
 # FUNCIONES MATEMÁTICAS
 # ─────────────────────────────────────────
 
-def hora_elsalvador():
-    """Retorna la hora actual en El Salvador."""
-    return datetime.now(TZ_SLV).strftime("%d/%m/%Y %I:%M %p")
-
-
 def calcular_ema(precios, periodo):
+    if len(precios) < periodo:
+        return None
     k   = 2.0 / (periodo + 1)
     ema = precios[0]
     for precio in precios[1:]:
@@ -72,6 +86,8 @@ def calcular_rsi(precios, periodo=14):
         else:
             ganancias.append(0)
             perdidas.append(abs(diff))
+    if len(ganancias) < periodo:
+        return None
     avg_gan = sum(ganancias[-periodo:]) / periodo
     avg_per = sum(perdidas[-periodo:])  / periodo
     if avg_per == 0:
@@ -80,25 +96,25 @@ def calcular_rsi(precios, periodo=14):
 
 
 def calcular_macd(precios):
-    """Calcula MACD, línea de señal e histograma."""
-    ema_r  = [calcular_ema(precios[:i+1], MACD_RAPIDA) for i in range(len(precios)) if i >= MACD_RAPIDA]
-    ema_l  = [calcular_ema(precios[:i+1], MACD_LENTA)  for i in range(len(precios)) if i >= MACD_LENTA]
-    n      = min(len(ema_r), len(ema_l))
+    if len(precios) < MACD_LENTA + MACD_SEÑAL:
+        return None, None, None, None
+    ema_r = [calcular_ema(precios[:i+1], MACD_RAPIDA) for i in range(len(precios)) if i >= MACD_RAPIDA]
+    ema_l = [calcular_ema(precios[:i+1], MACD_LENTA)  for i in range(len(precios)) if i >= MACD_LENTA]
+    n = min(len(ema_r), len(ema_l))
     macd_line  = [ema_r[-n+i] - ema_l[-n+i] for i in range(n)]
     señal_line = [calcular_ema(macd_line[:i+1], MACD_SEÑAL) for i in range(len(macd_line)) if i >= MACD_SEÑAL]
-    if not señal_line:
-        return None, None, None
-    hist    = macd_line[-1] - señal_line[-1]
-    hist_prev = macd_line[-2] - señal_line[-2] if len(señal_line) >= 2 else hist
+    if len(señal_line) < 2:
+        return None, None, None, None
+    hist      = macd_line[-1] - señal_line[-1]
+    hist_prev = macd_line[-2] - señal_line[-2]
     return macd_line[-1], señal_line[-1], hist, hist_prev
 
 
 def calcular_atr(velas, periodo=14):
-    """Calcula el ATR (Average True Range) para definir TP y SL."""
     true_ranges = []
     for i in range(1, len(velas)):
-        high  = float(velas[i][2])
-        low   = float(velas[i][3])
+        high       = float(velas[i][2])
+        low        = float(velas[i][3])
         close_prev = float(velas[i-1][4])
         tr = max(high - low, abs(high - close_prev), abs(low - close_prev))
         true_ranges.append(tr)
@@ -108,7 +124,6 @@ def calcular_atr(velas, periodo=14):
 
 
 def obtener_datos(simbolo):
-    """Obtiene velas de Kraken con datos OHLC completos."""
     url    = "https://api.kraken.com/0/public/OHLC"
     params = {"pair": simbolo, "interval": INTERVALO}
     try:
@@ -117,9 +132,9 @@ def obtener_datos(simbolo):
         if data.get("error"):
             print(f"[Kraken] Error en {simbolo}: {data['error']}")
             return None, None
-        result = data.get("result", {})
-        clave  = [k for k in result.keys() if k != "last"][0]
-        velas  = result[clave]
+        result  = data.get("result", {})
+        clave   = [k for k in result.keys() if k != "last"][0]
+        velas   = result[clave]
         precios = [float(v[4]) for v in velas]
         print(f"[Kraken] {simbolo}: {len(precios)} velas | ${precios[-1]:,.4f}")
         return precios, velas
@@ -145,10 +160,14 @@ def enviar_whatsapp(mensaje: str):
         return False
 
 
+# ─────────────────────────────────────────
+# ANÁLISIS
+# ─────────────────────────────────────────
+
 def analizar_moneda(nombre, simbolo):
     precios, velas = obtener_datos(simbolo)
-    if not precios or not velas or len(precios) < 50:
-        print(f"[Bot] {nombre}: Sin datos suficientes.")
+    if not precios or not velas or len(precios) < 210:
+        print(f"[Bot] {nombre}: Datos insuficientes (necesita 210+ velas).")
         return
 
     precio_actual = precios[-1]
@@ -156,33 +175,37 @@ def analizar_moneda(nombre, simbolo):
     # ── Indicadores ──────────────────────────
     ema_r      = calcular_ema(precios,      EMA_RAPIDA)
     ema_l      = calcular_ema(precios,      EMA_LENTA)
+    ema_200    = calcular_ema(precios,      EMA_TENDENCIA)
     ema_r_prev = calcular_ema(precios[:-1], EMA_RAPIDA)
     ema_l_prev = calcular_ema(precios[:-1], EMA_LENTA)
     rsi        = calcular_rsi(precios,      RSI_PERIODO)
     atr        = calcular_atr(velas,        ATR_PERIODO)
-    resultado_macd = calcular_macd(precios)
+    macd_val, señal_val, hist, hist_prev = calcular_macd(precios)
 
-    if resultado_macd[0] is None or atr is None:
-        print(f"[Bot] {nombre}: Datos insuficientes para MACD/ATR.")
+    if None in [ema_r, ema_l, ema_200, rsi, atr, macd_val]:
+        print(f"[Bot] {nombre}: Indicadores incompletos.")
         return
 
-    macd_val, señal_val, hist, hist_prev = resultado_macd
+    # ── Filtro de tendencia (EMA 200) ─────────
+    tendencia_alcista = precio_actual > ema_200
+    tendencia_bajista = precio_actual < ema_200
 
-    # ── Condiciones de entrada ────────────────
+    # ── Cruces EMA 9/21 ───────────────────────
     cruce_alcista = ema_r_prev < ema_l_prev and ema_r > ema_l
     cruce_bajista = ema_r_prev > ema_l_prev and ema_r < ema_l
-    macd_alcista  = hist > 0 and hist_prev <= 0   # MACD cruza hacia arriba
-    macd_bajista  = hist < 0 and hist_prev >= 0   # MACD cruza hacia abajo
 
-    print(f"[Bot] {nombre} | RSI: {rsi:.1f} | MACD hist: {hist:.4f} | ATR: {atr:.4f}")
+    # ── MACD ─────────────────────────────────
+    macd_alcista = hist > 0 and hist_prev <= 0
+    macd_bajista = hist < 0 and hist_prev >= 0
 
-    # ── Señal LONG (compra) ───────────────────
-    # Condición: EMA cruza al alza + MACD positivo + RSI entre 40-65 (momentum sin sobrecompra)
-    es_long  = cruce_alcista and macd_alcista and 40 <= rsi <= 65
+    print(f"[Bot] {nombre} | RSI: {rsi:.1f} | MACD: {hist:.5f} | ATR: {atr:.4f} | EMA200: {'↑' if tendencia_alcista else '↓'}")
 
-    # ── Señal SHORT (venta) ───────────────────
-    # Condición: EMA cruza a la baja + MACD negativo + RSI entre 35-60
-    es_short = cruce_bajista and macd_bajista and 35 <= rsi <= 60
+    # ── Señales con filtro de tendencia ───────
+    # LONG: precio sobre EMA200 + cruce alcista + MACD positivo + RSI entre 40-65
+    es_long  = tendencia_alcista and cruce_alcista and macd_alcista and 40 <= rsi <= 65
+
+    # SHORT: precio bajo EMA200 + cruce bajista + MACD negativo + RSI entre 35-60
+    es_short = tendencia_bajista and cruce_bajista and macd_bajista and 35 <= rsi <= 60
 
     senal = None
     if es_long:
@@ -193,7 +216,6 @@ def analizar_moneda(nombre, simbolo):
     if senal and senal != ultimas_senales[nombre]:
         ultimas_senales[nombre] = senal
 
-        # ── Precios de entrada, TP y SL ──────────
         entrada = precio_actual
         if senal == "LONG":
             take_profit = entrada + (atr * TP_MULTIPLICADOR)
@@ -213,12 +235,11 @@ def analizar_moneda(nombre, simbolo):
             "XRP      (XRP)": "✕",
         }
 
-        # Ratio riesgo/beneficio
         riesgo    = abs(entrada - stop_loss)
         beneficio = abs(take_profit - entrada)
         ratio     = beneficio / riesgo if riesgo > 0 else 0
-
-        hora = hora_elsalvador()
+        tendencia = "📈 Alcista" if tendencia_alcista else "📉 Bajista"
+        hora      = hora_elsalvador()
 
         mensaje = (
             f"{emoji} *{direccion}*\n"
@@ -228,7 +249,8 @@ def analizar_moneda(nombre, simbolo):
             f"🎯 *Take Profit:* ${take_profit:,.4f}\n"
             f"🛑 *Stop Loss:*   ${stop_loss:,.4f}\n"
             f"━━━━━━━━━━━━━━━━\n"
-            f"📊 RSI: {rsi:.1f} | MACD: {macd_val:.4f}\n"
+            f"📊 RSI: {rsi:.1f} | MACD: {hist:.5f}\n"
+            f"🌊 Tendencia: {tendencia}\n"
             f"📐 Ratio R/B: 1:{ratio:.1f}\n"
             f"🕐 {hora} (El Salvador)\n"
             f"━━━━━━━━━━━━━━━━\n"
@@ -241,6 +263,12 @@ def analizar_moneda(nombre, simbolo):
 
 
 def analizar_mercado():
+    # ── Filtro de horario ─────────────────────
+    if not es_horario_valido():
+        hora = hora_elsalvador()
+        print(f"[Bot] Fuera de horario ({hora}). Operando solo entre 8AM-10PM hora El Salvador.")
+        return
+
     print(f"\n[Bot] ── Análisis: {hora_elsalvador()} ──")
     ultimo_analisis["hora"] = datetime.now()
     for nombre, simbolo in MONEDAS.items():
@@ -265,7 +293,11 @@ def inicio():
         analizar_mercado()
     else:
         print("[Bot] Ping recibido. Esperando próximo análisis.")
-    return jsonify({"estado": "Bot activo ✅", "hora": hora_elsalvador()}), 200
+    return jsonify({
+        "estado":   "Bot activo ✅",
+        "hora":     hora_elsalvador(),
+        "horario":  "Activo ✅" if es_horario_valido() else "Fuera de horario 🌙 (8AM-10PM)"
+    }), 200
 
 
 @app.route("/analizar", methods=["GET"])
@@ -280,5 +312,5 @@ def analizar_ahora():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Bot Avanzado iniciado en puerto {port}")
+    print(f"🚀 Bot PRO iniciado en puerto {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
