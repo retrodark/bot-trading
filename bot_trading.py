@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────
-#  BOT DE TRADING PRO - Multi-moneda
+#  BOT SCALPING PRO - Multi-moneda
+#  Velas: 15 minutos | Análisis cada 15 minutos
 #  Estrategia: EMA 9/21/200 + RSI + MACD + ATR
-#  Filtros: Tendencia general + Horario El Salvador
 #  Zona horaria: El Salvador (UTC-6)
 # ─────────────────────────────────────────────────────────
 
@@ -26,24 +26,22 @@ MONEDAS = {
     "XRP      (XRP)": "XRPUSD",
 }
 
-INTERVALO        = 60    # velas de 1 hora
+INTERVALO        = 15    # 15 minutos para scalping
 EMA_RAPIDA       = 9
 EMA_LENTA        = 21
-EMA_TENDENCIA    = 200   # Filtro de tendencia general
+EMA_TENDENCIA    = 200
 RSI_PERIODO      = 14
 MACD_RAPIDA      = 12
 MACD_LENTA       = 26
 MACD_SEÑAL       = 9
 ATR_PERIODO      = 14
-TP_MULTIPLICADOR = 2.0
-SL_MULTIPLICADOR = 1.0
+TP_MULTIPLICADOR = 1.5   # Más ajustado para scalping
+SL_MULTIPLICADOR = 0.75  # Stop loss más ajustado
 
-# ── Filtro de horario (hora El Salvador) ──
-HORA_INICIO = 8   # 8:00 AM
-HORA_FIN    = 22  # 10:00 PM
-
-# Zona horaria El Salvador (UTC-6)
-TZ_SLV = timezone(timedelta(hours=-6))
+# Horario El Salvador
+HORA_INICIO = 8
+HORA_FIN    = 22
+TZ_SLV      = timezone(timedelta(hours=-6))
 
 ultimas_senales = {nombre: None for nombre in MONEDAS}
 ultimo_analisis = {"hora": None}
@@ -57,13 +55,11 @@ def hora_elsalvador():
 
 
 def es_horario_valido():
-    """Retorna True si estamos en horario de mayor liquidez (8AM - 10PM SLV)."""
-    hora_actual = datetime.now(TZ_SLV).hour
-    return HORA_INICIO <= hora_actual < HORA_FIN
+    return HORA_INICIO <= datetime.now(TZ_SLV).hour < HORA_FIN
 
 
 # ─────────────────────────────────────────
-# FUNCIONES MATEMÁTICAS
+# MATEMÁTICAS
 # ─────────────────────────────────────────
 
 def calcular_ema(precios, periodo):
@@ -71,12 +67,14 @@ def calcular_ema(precios, periodo):
         return None
     k   = 2.0 / (periodo + 1)
     ema = precios[0]
-    for precio in precios[1:]:
-        ema = precio * k + ema * (1 - k)
+    for p in precios[1:]:
+        ema = p * k + ema * (1 - k)
     return ema
 
 
 def calcular_rsi(precios, periodo=14):
+    if len(precios) < periodo + 1:
+        return None
     ganancias, perdidas = [], []
     for i in range(1, len(precios)):
         diff = precios[i] - precios[i - 1]
@@ -86,8 +84,6 @@ def calcular_rsi(precios, periodo=14):
         else:
             ganancias.append(0)
             perdidas.append(abs(diff))
-    if len(ganancias) < periodo:
-        return None
     avg_gan = sum(ganancias[-periodo:]) / periodo
     avg_per = sum(perdidas[-periodo:])  / periodo
     if avg_per == 0:
@@ -96,17 +92,26 @@ def calcular_rsi(precios, periodo=14):
 
 
 def calcular_macd(precios):
-    if len(precios) < MACD_LENTA + MACD_SEÑAL:
+    if len(precios) < MACD_LENTA + MACD_SEÑAL + 5:
         return None, None, None, None
-    ema_r = [calcular_ema(precios[:i+1], MACD_RAPIDA) for i in range(len(precios)) if i >= MACD_RAPIDA]
-    ema_l = [calcular_ema(precios[:i+1], MACD_LENTA)  for i in range(len(precios)) if i >= MACD_LENTA]
-    n = min(len(ema_r), len(ema_l))
-    macd_line  = [ema_r[-n+i] - ema_l[-n+i] for i in range(n)]
-    señal_line = [calcular_ema(macd_line[:i+1], MACD_SEÑAL) for i in range(len(macd_line)) if i >= MACD_SEÑAL]
-    if len(señal_line) < 2:
+    ema_r = []
+    ema_l = []
+    for i in range(len(precios)):
+        if i >= MACD_RAPIDA - 1:
+            ema_r.append(calcular_ema(precios[:i+1], MACD_RAPIDA))
+        if i >= MACD_LENTA - 1:
+            ema_l.append(calcular_ema(precios[:i+1], MACD_LENTA))
+    n         = min(len(ema_r), len(ema_l))
+    macd_line = [ema_r[-n+i] - ema_l[-n+i] for i in range(n)]
+    señal_line = []
+    for i in range(len(macd_line)):
+        if i >= MACD_SEÑAL - 1:
+            señal_line.append(calcular_ema(macd_line[:i+1], MACD_SEÑAL))
+    if len(señal_line) < 3:
         return None, None, None, None
     hist      = macd_line[-1] - señal_line[-1]
     hist_prev = macd_line[-2] - señal_line[-2]
+    hist_prev2 = macd_line[-3] - señal_line[-3]
     return macd_line[-1], señal_line[-1], hist, hist_prev
 
 
@@ -130,7 +135,7 @@ def obtener_datos(simbolo):
         r    = requests.get(url, params=params, timeout=15)
         data = r.json()
         if data.get("error"):
-            print(f"[Kraken] Error en {simbolo}: {data['error']}")
+            print(f"[Kraken] Error {simbolo}: {data['error']}")
             return None, None
         result  = data.get("result", {})
         clave   = [k for k in result.keys() if k != "last"][0]
@@ -139,16 +144,15 @@ def obtener_datos(simbolo):
         print(f"[Kraken] {simbolo}: {len(precios)} velas | ${precios[-1]:,.4f}")
         return precios, velas
     except Exception as e:
-        print(f"[Kraken] Error en {simbolo}: {e}")
+        print(f"[Kraken] Error {simbolo}: {e}")
         return None, None
 
 
 def enviar_whatsapp(mensaje: str):
-    mensaje_codificado = urllib.parse.quote(mensaje)
     url = (
         f"https://api.callmebot.com/whatsapp.php"
         f"?phone={WHATSAPP_NUMERO}"
-        f"&text={mensaje_codificado}"
+        f"&text={urllib.parse.quote(mensaje)}"
         f"&apikey={CALLMEBOT_APIKEY}"
     )
     try:
@@ -161,13 +165,13 @@ def enviar_whatsapp(mensaje: str):
 
 
 # ─────────────────────────────────────────
-# ANÁLISIS
+# LÓGICA DE SEÑALES
 # ─────────────────────────────────────────
 
 def analizar_moneda(nombre, simbolo):
     precios, velas = obtener_datos(simbolo)
     if not precios or not velas or len(precios) < 210:
-        print(f"[Bot] {nombre}: Datos insuficientes (necesita 210+ velas).")
+        print(f"[Bot] {nombre}: Datos insuficientes.")
         return
 
     precio_actual = precios[-1]
@@ -186,26 +190,51 @@ def analizar_moneda(nombre, simbolo):
         print(f"[Bot] {nombre}: Indicadores incompletos.")
         return
 
-    # ── Filtro de tendencia (EMA 200) ─────────
+    # ── Filtro de tendencia ───────────────────
     tendencia_alcista = precio_actual > ema_200
     tendencia_bajista = precio_actual < ema_200
 
-    # ── Cruces EMA 9/21 ───────────────────────
-    cruce_alcista = ema_r_prev < ema_l_prev and ema_r > ema_l
-    cruce_bajista = ema_r_prev > ema_l_prev and ema_r < ema_l
+    # ── EMA 9 sobre/bajo EMA 21 (más flexible que esperar cruce exacto) ──
+    ema_alcista = ema_r > ema_l      # EMA rápida sobre lenta = tendencia alcista corto plazo
+    ema_bajista = ema_r < ema_l      # EMA rápida bajo lenta  = tendencia bajista corto plazo
 
-    # ── MACD ─────────────────────────────────
-    macd_alcista = hist > 0 and hist_prev <= 0
-    macd_bajista = hist < 0 and hist_prev >= 0
+    # ── Momentum EMA: la distancia entre EMAs está creciendo ─────────────
+    distancia_actual  = ema_r - ema_l
+    distancia_prev    = ema_r_prev - ema_l_prev
+    momentum_alcista  = distancia_actual > distancia_prev   # Separación creciendo al alza
+    momentum_bajista  = distancia_actual < distancia_prev   # Separación creciendo a la baja
 
-    print(f"[Bot] {nombre} | RSI: {rsi:.1f} | MACD: {hist:.5f} | ATR: {atr:.4f} | EMA200: {'↑' if tendencia_alcista else '↓'}")
+    # ── MACD histograma positivo/negativo (no requiere cruce exacto) ──────
+    macd_positivo = hist > 0
+    macd_negativo = hist < 0
+    macd_subiendo = hist > hist_prev   # Histograma aumentando
+    macd_bajando  = hist < hist_prev   # Histograma disminuyendo
 
-    # ── Señales con filtro de tendencia ───────
-    # LONG: precio sobre EMA200 + cruce alcista + MACD positivo + RSI entre 40-65
-    es_long  = tendencia_alcista and cruce_alcista and macd_alcista and 40 <= rsi <= 65
+    print(f"[Bot] {nombre} | RSI:{rsi:.1f} | MACD:{hist:.5f} | ATR:{atr:.5f} | EMA200:{'↑' if tendencia_alcista else '↓'} | EMA9>21:{'SI' if ema_alcista else 'NO'}")
 
-    # SHORT: precio bajo EMA200 + cruce bajista + MACD negativo + RSI entre 35-60
-    es_short = tendencia_bajista and cruce_bajista and macd_bajista and 35 <= rsi <= 60
+    # ── SEÑAL LONG ────────────────────────────
+    # Tendencia general alcista + EMA corto plazo alcista +
+    # momentum creciendo + MACD positivo y subiendo + RSI entre 45-70
+    es_long = (
+        tendencia_alcista and
+        ema_alcista and
+        momentum_alcista and
+        macd_positivo and
+        macd_subiendo and
+        45 <= rsi <= 70
+    )
+
+    # ── SEÑAL SHORT ───────────────────────────
+    # Tendencia general bajista + EMA corto plazo bajista +
+    # momentum bajando + MACD negativo y bajando + RSI entre 30-55
+    es_short = (
+        tendencia_bajista and
+        ema_bajista and
+        momentum_bajista and
+        macd_negativo and
+        macd_bajando and
+        30 <= rsi <= 55
+    )
 
     senal = None
     if es_long:
@@ -252,35 +281,33 @@ def analizar_moneda(nombre, simbolo):
             f"📊 RSI: {rsi:.1f} | MACD: {hist:.5f}\n"
             f"🌊 Tendencia: {tendencia}\n"
             f"📐 Ratio R/B: 1:{ratio:.1f}\n"
+            f"⏱ Temporalidad: 15 min\n"
             f"🕐 {hora} (El Salvador)\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"⚠️ Gestiona tu riesgo siempre."
         )
-        print(f"[Bot] ¡Señal {senal} en {nombre}! TP: {take_profit:.4f} | SL: {stop_loss:.4f}")
+        print(f"[Bot] Señal {senal} en {nombre} | TP:{take_profit:.4f} SL:{stop_loss:.4f}")
         enviar_whatsapp(mensaje)
     else:
-        print(f"[Bot] {nombre}: Sin señal nueva.")
+        print(f"[Bot] {nombre}: Sin señal.")
 
 
 def analizar_mercado():
-    # ── Filtro de horario ─────────────────────
     if not es_horario_valido():
-        hora = hora_elsalvador()
-        print(f"[Bot] Fuera de horario ({hora}). Operando solo entre 8AM-10PM hora El Salvador.")
+        print(f"[Bot] Fuera de horario — {hora_elsalvador()}")
         return
-
     print(f"\n[Bot] ── Análisis: {hora_elsalvador()} ──")
     ultimo_analisis["hora"] = datetime.now()
     for nombre, simbolo in MONEDAS.items():
         analizar_moneda(nombre, simbolo)
-    print("[Bot] ── Análisis completado ──\n")
+    print("[Bot] ── Completado ──\n")
 
 
 def debe_analizar():
-    ahora = datetime.now()
     if ultimo_analisis["hora"] is None:
         return True
-    return (ahora - ultimo_analisis["hora"]).total_seconds() >= 1800
+    segundos = (datetime.now() - ultimo_analisis["hora"]).total_seconds()
+    return segundos >= 900   # Cada 15 minutos para scalping
 
 
 # ─────────────────────────────────────────
@@ -292,11 +319,11 @@ def inicio():
     if debe_analizar():
         analizar_mercado()
     else:
-        print("[Bot] Ping recibido. Esperando próximo análisis.")
+        print("[Bot] Ping — esperando próximo análisis.")
     return jsonify({
-        "estado":   "Bot activo ✅",
-        "hora":     hora_elsalvador(),
-        "horario":  "Activo ✅" if es_horario_valido() else "Fuera de horario 🌙 (8AM-10PM)"
+        "estado":  "Bot activo ✅",
+        "hora":    hora_elsalvador(),
+        "horario": "Activo ✅" if es_horario_valido() else "Fuera de horario 🌙"
     }), 200
 
 
@@ -312,5 +339,5 @@ def analizar_ahora():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Bot PRO iniciado en puerto {port}")
+    print(f"🚀 Bot Scalping PRO iniciado en puerto {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
